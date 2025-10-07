@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PDF → 圖片 & Excel 批次改名</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans TC", "PingFang TC"; padding: 20px; background:#f9fafb; }
+    h1 { font-size: 20px; margin-bottom: 12px; }
+    .box { background:white; padding:16px; margin-bottom:16px; border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,0.05);}
+    .row { display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap; }
+    button { padding:8px 14px; border:0; border-radius:6px; background:#2563eb; color:white; cursor:pointer; }
+    button.remove { background:#dc2626; }
+    input[type=file] { display:none; }
+    label { background:#e2e8f0; padding:6px 12px; border-radius:6px; cursor:pointer; }
+    #log { margin-top:12px; font-size:13px; color:#334155; white-space:pre-wrap;}
+  </style>
+</head>
+<body>
+  <h1>PDF → 圖片 & Excel 批次改名</h1>
+
+  <div class="box">
+    <div class="row">
+      <label for="pdfInput">選擇 PDF</label>
+      <input type="file" id="pdfInput" accept="application/pdf" />
+      <button class="remove" id="removePdfBtn" style="display:none;">移除 PDF</button>
+      <span id="pdfInfo"></span>
+    </div>
+    <div class="row">
+      <label for="excelInput">選擇 Excel</label>
+      <input type="file" id="excelInput" accept=".xlsx,.xls" />
+      <span id="excelInfo"></span>
+    </div>
+    <div class="row">
+      <label>每人頁數：</label>
+      <input type="number" id="pagesPerPerson" value="1" min="1" style="width:60px;" />
+    </div>
+    <div class="row">
+      <label>輸出畫質：</label>
+      <input type="number" id="scaleValue" value="2" min="1" max="6" style="width:60px;" />
+      <span style="font-size:13px;color:#475569;">（數值越大越清晰，檔案也越大）</span>
+    </div>
+    <div class="row">
+      <button id="processBtn">開始處理</button>
+    </div>
+    <div id="log"></div>
+  </div>
+
+<script>
+let pdfFile = null;
+let excelFile = null;
+let excelNames = [];
+
+document.getElementById("pdfInput").addEventListener("change", async (e) => {
+  pdfFile = e.target.files[0];
+  if(pdfFile){
+    const arrayBuffer = await pdfFile.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+    document.getElementById("pdfInfo").innerText = `📄 ${pdfFile.name} （${pdf.numPages} 頁）`;
+    document.getElementById("removePdfBtn").style.display = "inline-block";
+  }
+});
+
+document.getElementById("removePdfBtn").addEventListener("click", () => {
+  pdfFile = null;
+  document.getElementById("pdfInput").value = "";
+  document.getElementById("pdfInfo").innerText = "";
+  document.getElementById("removePdfBtn").style.display = "none";
+});
+
+document.getElementById("excelInput").addEventListener("change", async (e) => {
+  excelFile = e.target.files[0];
+  if(excelFile){
+    const data = await excelFile.arrayBuffer();
+    const workbook = XLSX.read(data);
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, {header:1});
+    excelNames = rows.flat().filter(n => n);
+    document.getElementById("excelInfo").innerText = `📊 ${excelFile.name} （${excelNames.length} 人）`;
+  }
+});
+
+document.getElementById("processBtn").addEventListener("click", async () => {
+  const log = document.getElementById("log");
+  log.innerText = "";
+  if(!pdfFile || !excelFile){
+    alert("⚠️ 請先上傳 PDF 和 Excel 檔案！");
+    return;
+  }
+
+  const pagesPerPerson = parseInt(document.getElementById("pagesPerPerson").value);
+  const scale = parseInt(document.getElementById("scaleValue").value) || 2;
+
+  const arrayBuffer = await pdfFile.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+  const zip = new JSZip();
+
+  let pageIndex = 1;
+  for(let i=0;i<excelNames.length;i++){
+    const name = excelNames[i];
+    for(let j=1;j<=pagesPerPerson;j++){
+      if(pageIndex > pdf.numPages) break;
+      const page = await pdf.getPage(pageIndex);
+      const viewport = page.getViewport({scale});
+      const canvas = document.createElement("canvas");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext("2d");
+      await page.render({canvasContext: ctx, viewport}).promise;
+      const dataUrl = canvas.toDataURL("image/png");
+      const imgData = atob(dataUrl.split(",")[1]);
+      const u8 = new Uint8Array(imgData.length);
+      for(let k=0;k<imgData.length;k++){ u8[k] = imgData.charCodeAt(k); }
+      const filename = pagesPerPerson===1 ? `${name}.png` : `${name}${j}.png`;
+      zip.file(filename, u8);
+      log.innerText += `✔️ 產生：${filename}\n`;
+      pageIndex++;
+    }
+  }
+
+  const zipName = excelFile.name.replace(/\.(xlsx|xls)$/i,"") + ".zip";
+  const content = await zip.generateAsync({type:"blob"});
+  saveAs(content, zipName);
+});
+</script>
+</body>
+</html>
