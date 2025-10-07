@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>PDF → 圖片 & Excel 批次改名</title>
+  <title>PDF → 灰階圖片 & Excel 批次改名</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
@@ -18,10 +18,11 @@
     input[type=file] { display:none; }
     label { background:#e2e8f0; padding:6px 12px; border-radius:6px; cursor:pointer; }
     #log { margin-top:12px; font-size:13px; color:#334155; white-space:pre-wrap;}
+    progress { width:100%; height:16px; }
   </style>
 </head>
 <body>
-  <h1>PDF → 圖片 & Excel 批次改名</h1>
+  <h1>PDF → 灰階圖片 & Excel 批次改名</h1>
 
   <div class="box">
     <div class="row">
@@ -30,23 +31,33 @@
       <button class="remove" id="removePdfBtn" style="display:none;">移除 PDF</button>
       <span id="pdfInfo"></span>
     </div>
+
     <div class="row">
       <label for="excelInput">選擇 Excel</label>
       <input type="file" id="excelInput" accept=".xlsx,.xls" />
       <span id="excelInfo"></span>
     </div>
+    <p style="font-size:13px;color:#475569;margin-top:-6px;margin-bottom:10px;">
+      📌 EXCEL 名單請依 PDF 頁面順序排列，或掃描時請將作文紙依名單順序排列
+    </p>
+
     <div class="row">
       <label>每人頁數：</label>
       <input type="number" id="pagesPerPerson" value="1" min="1" style="width:60px;" />
     </div>
+
     <div class="row">
       <label>輸出畫質：</label>
-      <input type="number" id="scaleValue" value="2" min="1" max="6" style="width:60px;" />
-      <span style="font-size:13px;color:#475569;">（數值越大越清晰，檔案也越大）</span>
+      <select id="qualitySelect">
+        <option value="4">中畫質</option>
+        <option value="5">高畫質</option>
+      </select>
     </div>
+
     <div class="row">
       <button id="processBtn">開始處理</button>
     </div>
+    <progress id="progressBar" value="0" max="100" style="display:none;"></progress>
     <div id="log"></div>
   </div>
 
@@ -54,6 +65,18 @@
 let pdfFile = null;
 let excelFile = null;
 let excelNames = [];
+
+// 灰階轉換函式
+function convertToGrayscale(ctx, width, height) {
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i+1], b = data[i+2];
+    const gray = 0.299*r + 0.587*g + 0.114*b;
+    data[i] = data[i+1] = data[i+2] = gray;
+  }
+  ctx.putImageData(imageData, 0, 0);
+}
 
 document.getElementById("pdfInput").addEventListener("change", async (e) => {
   pdfFile = e.target.files[0];
@@ -79,52 +102,79 @@ document.getElementById("excelInput").addEventListener("change", async (e) => {
     const workbook = XLSX.read(data);
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet, {header:1});
-    excelNames = rows.flat().filter(n => n);
+    excelNames = rows.map(r => r[0]).filter(n => n); // 只取第一欄
     document.getElementById("excelInfo").innerText = `📊 ${excelFile.name} （${excelNames.length} 人）`;
   }
 });
 
 document.getElementById("processBtn").addEventListener("click", async () => {
   const log = document.getElementById("log");
+  const btn = document.getElementById("processBtn");
+  const progressBar = document.getElementById("progressBar");
   log.innerText = "";
+  progressBar.style.display = "block";
+  progressBar.value = 0;
+  btn.disabled = true;
+
   if(!pdfFile || !excelFile){
     alert("⚠️ 請先上傳 PDF 和 Excel 檔案！");
+    btn.disabled = false;
+    progressBar.style.display = "none";
     return;
   }
 
   const pagesPerPerson = parseInt(document.getElementById("pagesPerPerson").value);
-  const scale = parseInt(document.getElementById("scaleValue").value) || 2;
+  const scale = parseInt(document.getElementById("qualitySelect").value);
 
   const arrayBuffer = await pdfFile.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
   const zip = new JSZip();
 
   let pageIndex = 1;
+  let totalPagesNeeded = excelNames.length * pagesPerPerson;
+  let processed = 0;
+
+  const tasks = [];
   for(let i=0;i<excelNames.length;i++){
     const name = excelNames[i];
     for(let j=1;j<=pagesPerPerson;j++){
-      if(pageIndex > pdf.numPages) break;
-      const page = await pdf.getPage(pageIndex);
-      const viewport = page.getViewport({scale});
-      const canvas = document.createElement("canvas");
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      const ctx = canvas.getContext("2d");
-      await page.render({canvasContext: ctx, viewport}).promise;
-      const dataUrl = canvas.toDataURL("image/png");
-      const imgData = atob(dataUrl.split(",")[1]);
-      const u8 = new Uint8Array(imgData.length);
-      for(let k=0;k<imgData.length;k++){ u8[k] = imgData.charCodeAt(k); }
+      if(pageIndex > pdf.numPages) {
+        log.innerText += `⚠️ PDF 頁數不足，第 ${i+1} 位 (${name}) 起無法輸出\n`;
+        break;
+      }
+      const currentIndex = pageIndex;
       const filename = pagesPerPerson===1 ? `${name}.png` : `${name}${j}.png`;
-      zip.file(filename, u8);
-      log.innerText += `✔️ 產生：${filename}\n`;
+      tasks.push((async () => {
+        const page = await pdf.getPage(currentIndex);
+        const viewport = page.getViewport({scale});
+        const canvas = document.createElement("canvas");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext("2d");
+        await page.render({canvasContext: ctx, viewport}).promise;
+        convertToGrayscale(ctx, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL("image/png");
+        const imgData = atob(dataUrl.split(",")[1]);
+        const u8 = new Uint8Array(imgData.length);
+        for(let k=0;k<imgData.length;k++){ u8[k] = imgData.charCodeAt(k); }
+        zip.file(filename, u8);
+        processed++;
+        log.innerText += `✔️ 產生：${filename}\n`;
+        progressBar.value = Math.min(100, (processed/totalPagesNeeded)*100);
+      })());
       pageIndex++;
     }
   }
 
+  await Promise.all(tasks);
+
   const zipName = excelFile.name.replace(/\.(xlsx|xls)$/i,"") + ".zip";
   const content = await zip.generateAsync({type:"blob"});
   saveAs(content, zipName);
+
+  log.innerText += "✅ 全部完成！";
+  btn.disabled = false;
+  progressBar.style.display = "none";
 });
 </script>
 </body>
